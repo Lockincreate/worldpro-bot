@@ -11,7 +11,7 @@ threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.getenv("PORT
 
 def get_all_games(d_str):
     # ALL leagues - no filter
-    url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/scoreboard?dates={d_str}"
+    url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/all/scoreboard?dates={d_str}"
     try:
         r = requests.get(url, timeout=20).json()
         return r.get('events', [])

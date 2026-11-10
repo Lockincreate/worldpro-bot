@@ -1,8 +1,8 @@
 import requests, time, os
 from datetime import date, datetime
 
-TOKEN = os.getenv("TOKEN", "9236063003:AAF5-EvZ6Un68qnZtuzUhOpDKPjXFirOeFY" 
-API_KEY = os.getenv("API_KEY"," 9825d7314f8d20c4ca29d38dfa6fbce9")
+TOKEN = os.getenv("TOKEN") 
+API_KEY = os.getenv("API_KEY",)
 BASE = f"https://api.telegram.org/bot{TOKEN}"
 HEADERS = {"x-apisports-key": API_KEY}
 

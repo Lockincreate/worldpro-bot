@@ -1,219 +1,131 @@
-import os, requests, telebot, threading, time
-from flask import Flask
-from datetime import date, timedelta
+import requests, time, os
+from datetime import date, datetime
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-bot = telebot.TeleBot(BOT_TOKEN)
-app = Flask(__name__)
-@app.route('/')
-def home(): return "WorldPro Auto Live!"
-threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.getenv("PORT", 10000))), daemon=True).start()
+TOKEN = os.getenv("TOKEN", "9236063003:AAF5-EvZ6Un68qnZtuzUhOpDKPjXFirOeFY" 
+API_KEY = os.getenv("API_KEY"," 9825d7314f8d20c4ca29d38dfa6fbce9")
+BASE = f"https://api.telegram.org/bot{TOKEN}"
+HEADERS = {"x-apisports-key": API_KEY}
 
-# NO HARDCODED LEAGUES - Bot finds them itself from ESPN
+# BRAIN: Leagues that score a lot - mystery list, updated
+HIGH = ["Eredivisie", "Bundesliga", "Eliteserien", "Allsvenskan", "Veikkausliiga", "Premier League", "Champions League", "Super Lig", "Jupiler Pro League", "Premiership", "La Liga"]
+MEDIUM = ["Serie A", "Ligue 1", "Primeira Liga", "Eredivisie", "Championship", "Liga Portugal"]
 
-def get_all_grouped(d_str):
-    """Ask ESPN what leagues exist today - bot discovers itself"""
-    url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/all/scoreboard?dates={d_str}&limit=1000"
+def get_today():
+    # Only 1 request - PARA is date=today, status=NS, no season, no live
     try:
-        data = requests.get(url, timeout=20).json()
+        r = requests.get("https://v3.football.api-sports.io/fixtures", headers=HEADERS, params={"date": str(date.today()), "status": "NS"}, timeout=15)
+        return r.json().get("response", [])
     except:
         return []
-    # ESPN returns leagues array - each league has its own name + events
-    # This is the auto-discovery - we don't guess names
-    grouped = []
-    leagues = data.get('leagues', [])
-    if leagues:
-        for lg in leagues:
-            lname = lg.get('name', 'Soccer')
-            for e in lg.get('events', []):
-                grouped.append((lname, e))
-        return grouped
-    # Fallback: if ESPN returns flat events, get league from event itself
-    for e in data.get('events', []):
-        lname = e.get('league', {}).get('name', 'Soccer')
-        # Try competitions for real league name
-        try:
-            comp = e['competitions'][0]
-            # ESPN sometimes puts league in competition -> league
-            if 'league' in comp:
-                lname = comp['league'].get('name', lname)
-        except: pass
-        grouped.append((lname, e))
-    return grouped
 
-def parse(lname, e):
+def get_hockey():
     try:
-        comp = e['competitions'][0]
-        h = [c for c in comp['competitors'] if c['homeAway']=='home'][0]
-        a = [c for c in comp['competitors'] if c['homeAway']=='away'][0]
-        return {
-            'league': lname,
-            'h': h['team']['displayName'], 'hs': h.get('score','0'),
-            'a': a['team']['displayName'], 'as': a.get('score','0'),
-            'detail': e['status']['type']['detail'], 'state': e['status']['type']['state'],
-            'id': e['id']
-        }
-    except: return None
+        r = requests.get("https://v1.hockey.api-sports.io/games", headers=HEADERS, params={"date": str(date.today())}, timeout=10)
+        return r.json().get("response", [])[:2]
+    except: return []
 
-def get_summary(eid):
+def get_basket():
     try:
-        url = f"https://site.api.espn.com/apis/site/v2/sports/soccer/all/summary?event={eid}"
-        return requests.get(url, timeout=15).json()
-    except: return {}
+        r = requests.get("https://v1.basketball.api-sports.io/games", headers=HEADERS, params={"date": str(date.today())}, timeout=10)
+        return r.json().get("response", [])[:2]
+    except: return []
 
-def get_lineup_injuries_stats(summary):
-    txt = ""
-    # Stats - real from ESPN
-    try:
-        txt += "\n📊 STATS:\n"
-        for t in summary.get('boxscore', {}).get('teams', []):
-            s = {x['name']: x['displayValue'] for x in t.get('statistics', [])}
-            txt += f"{t['team']['displayName']}: Poss {s.get('possessionPct','-')} | Shots {s.get('totalShots','-')} | On Target {s.get('shotsOnTarget','-')} | Corners {s.get('wonCorners','-')} | Fouls {s.get('fouls','-')}\n"
-    except: pass
-    # Lineup / Injuries - ESPN releases 1hr before kickoff, if not yet, say so honestly
-    try:
-        if summary.get('lineups'):
-            txt += "\n👥 LINEUP:\n"
-            for lu in summary.get('lineups', []):
-                txt += f"{lu.get('team',{}).get('displayName','')}: "
-                players = [p.get('athlete',{}).get('displayName','') for p in lu.get('formation',{}).get('players',[])[:11]]
-                txt += ", ".join(players) + "\n"
-        else:
-            txt += "\n👥 LINEUP: Not released yet by ESPN - check 1hr before kickoff.\n"
-    except: pass
-    try:
-        if summary.get('injuries'):
-            txt += "\n🤕 INJURIES:\n"
-            for g in summary.get('injuries', []):
-                for p in g.get('players', [])[:5]:
-                    txt += f" - {p.get('athlete',{}).get('displayName','')} - {p.get('status','Out')}\n"
-        else:
-            txt += "\n🤕 INJURIES: No injuries reported by ESPN for this game.\n"
-    except: pass
-    return txt
-
-def all_markets(h, a, league):
-    return f"""💰 ALL MARKETS - {h} vs {a}
-League: {league}
-
-🏆 SAFE:
-1. Over 1.5 Goals - YES - 85%
-2. Double Chance: {h} or Draw (1X) - 72%
-3. 1st Half Over 0.5 Goals - 68%
-
-🔥 VALUE:
-4. BTTS - YES - 65%
-5. Over 2.5 Goals - 62%
-6. BTTS + Over 2.5 - 55%
-
-⚡ HIGH ODDS:
-7. {h} Win + BTTS - 48%
-8. Over 3.5 Goals - 38%
-9. 1st Half: {h} Win
-
-🎯 CORRECT SCORE LEAN: {h} 2-1 {a} OR {h} 2-0 {a}
-Stake: SAFE R30, VALUE R20, HIGH R10. Ungabheji konke!
-"""
-
-def format_grouped(grouped, title):
-    if not grouped:
-        return f"{title}\n\nAkukho mdlalo - ESPN itself says none."
-    # Group by league name that ESPN gave us
-    by_league = {}
-    for lname, e in grouped:
-        p = parse(lname, e)
-        if p:
-            by_league.setdefault(lname, []).append(p)
-    txt = f"{title}\n\n"
-    for lname, games in by_league.items():
-        txt += f"🏆 {lname}\n"
-        for p in games:
-            if "vs" in title or p['state'] != 'post':
-                txt += f"{p['h']} {p['hs']}-{p['as']} {p['a']} - {p['detail']}\n"
-            else:
-                txt += f"FT: {p['h']} {p['hs']}-{p['as']} {p['a']}\n"
-        txt += "\n"
-    return txt
-
-@bot.message_handler(commands=['start','help'])
-def start(m):
-    bot.reply_to(m, "👋 WORLDPRO AUTO ✅\nBot finds leagues itself, no hardcoded list.\n\n/today - Yanamuhla ⚽\n/tomorrow - Yakusasa 📅\n/live - Live 🔴\n/results - Izolo ✅\n/tip - All Markets 💰\n/match Pirates - Lineup, Injuries, Stats, All Markets 📊\n\nBhala nje: Pirates, Chiefs, Arsenal")
-
-@bot.message_handler(commands=['today'])
-def today(m):
-    d = date.today().strftime("%Y%m%d")
-    bot.reply_to(m, format_grouped(get_all_grouped(d), "⚽ YANAMUHLA - AUTO DISCOVERED ✅"))
-
-@bot.message_handler(commands=['tomorrow'])
-def tomorrow(m):
-    d = (date.today()+timedelta(days=1)).strftime("%Y%m%d")
-    bot.reply_to(m, format_grouped(get_all_grouped(d), "📅 YAKUSASA - AUTO DISCOVERED ✅"))
-
-@bot.message_handler(commands=['live'])
-def live(m):
-    d = date.today().strftime("%Y%m%d")
-    grouped = [(ln, e) for ln, e in get_all_grouped(d) if parse(ln, e) and parse(ln, e)['state']=='in']
-    if not grouped:
-        bot.reply_to(m, "🔴 LIVE: Ayikho edlalwayo manje.")
-        return
-    bot.reply_to(m, format_grouped(grouped, "🔴 LIVE NOW ✅"))
-
-@bot.message_handler(commands=['results'])
-def results(m):
-    d = (date.today()-timedelta(days=1)).strftime("%Y%m%d")
-    bot.reply_to(m, format_grouped(get_all_grouped(d), "✅ IMIPHUMELA IZOLO ✅"))
-
-@bot.message_handler(commands=['tip'])
-def tip(m):
-    d = date.today().strftime("%Y%m%d")
-    grouped = get_all_grouped(d)
-    # Pick first 3 games that are not finished, from whatever leagues ESPN found
+def brain_safe(matches):
+    # SAFE: Home team is strong at home + high league = 1X + Over 1.5
+    # This is the "don't lose your money" brain
     picks = []
-    for lname, e in grouped:
-        p = parse(lname, e)
-        if p and p['state'] != 'post':
-            picks.append(p)
-        if len(picks) >= 3: break
-    if not picks:
-        bot.reply_to(m, "💰 ITHIPHU:\n\nNamuhla akukho mdlalo - ESPN itself says none. UNGADLALI. Linda kusasa.")
-        return
-    txt = "💰 ITHIPHU - ALL MARKETS ✅\n\n"
-    for p in picks:
-        txt += all_markets(p['h'], p['a'], p['league']) + "\n---\n"
-    bot.reply_to(m, txt)
+    for m in matches:
+        league = m["league"]["name"]
+        home = m["teams"]["home"]["name"]; away = m["teams"]["away"]["name"]
+        if league in HIGH or league in MEDIUM:
+            picks.append(f"⚽ {league}\n{home} vs {away}\n👉 1X + Over 1.5 Goals (Safe)\n")
+        if len(picks) >= 2: break
+    return picks
 
-@bot.message_handler(commands=['match'])
-def match_cmd(m):
-    q = m.text.replace('/match','').strip().lower()
-    if not q:
-        bot.reply_to(m, "Bhala: /match Pirates"); return
-    for days in [0,1,-1,2,-2]:
-        dd = (date.today()+timedelta(days=days)).strftime("%Y%m%d")
-        for lname, e in get_all_grouped(dd):
-            p = parse(lname, e)
-            if p and (q in p['h'].lower() or q in p['a'].lower()):
-                label = "NAMUHLA" if days==0 else "YAKUSASA" if days==1 else "IZOLO" if days==-1 else f"{days} days"
-                summ = get_summary(p['id'])
-                extra = get_lineup_injuries_stats(summ)
-                txt = f"🏆 FULL PREVIEW - {label} ✅\n\n{p['h']} vs {p['a']}\nLeague: {p['league']} (Found by bot itself)\nStatus: {p['detail']} - Score: {p['hs']}-{p['as']}\n{extra}\n\n{all_markets(p['h'], p['a'], p['league'])}"
-                bot.reply_to(m, txt)
-                return
-    bot.reply_to(m, f"Angimtholanga u-{q} - ESPN ayinamdlalo wakhe kulezi zinsuku ezi-5.")
+def brain_medium(matches):
+    # MEDIUM: High scoring league only = Over 2.5 + BTTS
+    picks = []
+    for m in matches:
+        league = m["league"]["name"]
+        home = m["teams"]["home"]["name"]; away = m["teams"]["away"]["name"]
+        if league in HIGH:
+            picks.append(f"⚽ {league}\n{home} vs {away}\n👉 Over 2.5 + BTTS YES\n")
+        if len(picks) >= 2: break
+    return picks
 
-@bot.message_handler(func=lambda m: True)
-def search(m):
-    q = m.text.strip().lower()
-    if q.startswith('/'): return
-    for days in [0,1,-1]:
-        dd = (date.today()+timedelta(days=days)).strftime("%Y%m%d")
-        for lname, e in get_all_grouped(dd):
-            p = parse(lname, e)
-            if p and (q in p['h'].lower() or q in p['a'].lower()):
-                bot.reply_to(m, f"🔍 UTHOLE {p['h']} vs {p['a']} - {p['league']} - {p['detail']}\n\nThumela /match {p['h']} ukubona Lineup, Injuries, Stats, All Markets")
-                return
-    bot.reply_to(m, f"Angimtholanga u-{m.text}. Zama /today")
+def brain_jackpot(matches):
+    # JACKPOT: Only the craziest scoring leagues, Over 3.5 / Over 4.5
+    picks = []
+    for m in matches:
+        league = m["league"]["name"]
+        home = m["teams"]["home"]["name"]; away = m["teams"]["away"]["name"]
+        # Only top 4 crazy leagues for jackpot
+        if league in ["Eredivisie", "Bundesliga", "Eliteserien", "Super Lig"]:
+            picks.append(f"⚽ {league}\n{home} vs {away}\n👉 Over 3.5 Goals (Jackpot)\n")
+        if len(picks) >= 2: break
+    return picks
 
-print("AUTO Bot starting...")
+def brain_mystery(matches):
+    # MYSTERY: Mix sports + LATE games (after 19:00) - teams tired, more goals
+    # Plus unknown leagues - bookies don't watch them, we catch value
+    picks = []
+    for m in matches:
+        hour = m["fixture"]["date"][11:13]
+        try: h = int(hour)
+        except: h = 12
+        league = m["league"]["name"]
+        home = m["teams"]["home"]["name"]; away = m["teams"]["away"]["name"]
+        # Mystery rule: late game OR unknown league (not in top list) = value
+        if h >= 19 or league not in HIGH + MEDIUM:
+            picks.append(f"🕵️ MYSTERY | {league}\n{home} vs {away}\n👉 Over 2.5 Goals (Late / Unknown)\n")
+            if len(picks) >= 1: break
+    # Add 1 hockey mystery - hockey always scores late
+    for g in get_hockey()[:1]:
+        picks.append(f"🏒 MYSTERY | {g['league']['name']}\n{g['teams']['home']['name']} vs {g['teams']['away']['name']}\n👉 Over 5.5 Goals\n")
+    # Add 1 basketball mystery
+    for g in get_basket()[:1]:
+        picks.append(f"🏀 MYSTERY | {g['league']['name']}\n{g['teams']['home']['name']} vs {g['teams']['away']['name']}\n👉 Over 155.5 Points\n")
+    return picks[:3]
+
+def make_all():
+    m = get_today()
+    if not m:
+        return "No games today bhuti. Rest."
+    s = brain_safe(m)
+    med = brain_medium(m)
+    j = brain_jackpot(m)
+    mys = brain_mystery(m)
+    text = "🔥 WORLD PRO - 4 BRAINS, 4 CHANCES 🔥\n\n"
+    text += "🛡️ SAFE TICKET (High win %)\n" + ("\n".join(s) if s else "No safe today\n") + "\n"
+    text += "⚡ MEDIUM TICKET (Good odds)\n" + ("\n".join(med) if med else "No medium today\n") + "\n"
+    text += "💰 JACKPOT TICKET (Big money)\n" + ("\n".join(j) if j else "No jackpot today - skip\n") + "\n"
+    text += "🕵️ MYSTERY TICKET (Secret)\n" + ("\n".join(mys) if mys else "No mystery today\n")
+    text += "\nPlay SAFE with small stake. Split your money: 50% Safe, 30% Medium, 10% Jackpot, 10% Mystery. 18+"
+    return text
+
+def send(chat_id, text):
+    requests.post(BASE + "/sendMessage", data={"chat_id": chat_id, "text": text})
+
+offset = 0
+print("4-Brain Bot running...")
 while True:
-    try: bot.polling(none_stop=True, timeout=60)
-    except Exception as e: print(e); time.sleep(5)
+    try:
+        r = requests.get(BASE + "/getUpdates", params={"offset": offset, "timeout": 10}).json()
+        for u in r.get("result", []):
+            offset = u["update_id"] + 1
+            msg = u.get("message", {}); chat = msg.get("chat", {}).get("id"); text = msg.get("text", "")
+            if text == "/start":
+                send(chat, "World Pro - 4 Brains 🧠🕵️\n/all = 4 tickets at once\n/safe = Safe only\n/medium = Medium only\n/jackpot = Jackpot only\n/mystery = Mystery only\n/ticket = Same as /all")
+            elif text in ["/ticket", "/all"]:
+                send(chat, make_all())
+            elif text == "/safe":
+                m = get_today(); send(chat, "🛡️ SAFE\n\n" + "\n".join(brain_safe(m)) if brain_safe(m) else "No safe today")
+            elif text == "/medium":
+                m = get_today(); send(chat, "⚡ MEDIUM\n\n" + "\n".join(brain_medium(m)) if brain_medium(m) else "No medium today")
+            elif text == "/jackpot":
+                m = get_today(); send(chat, "💰 JACKPOT\n\n" + "\n".join(brain_jackpot(m)) if brain_jackpot(m) else "No jackpot today")
+            elif text == "/mystery":
+                m = get_today(); send(chat, "🕵️ MYSTERY\n\n" + "\n".join(brain_mystery(m)) if brain_mystery(m) else "No mystery today")
+        time.sleep(3)
+    except Exception as e:
+        print("Error:", e); time.sleep(5)
